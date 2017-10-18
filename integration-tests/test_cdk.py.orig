@@ -7,9 +7,16 @@ from validation import validate_all
 namespace = os.environ.get('TEST_CHARM_NAMESPACE', 'containers')
 charm_channel = os.environ.get('TEST_CHARM_CHANNEL', 'stable')
 snap_channel = os.environ.get('TEST_SNAP_CHANNEL', '1.8/stable')
-bundles_csv = os.environ.get('TEST_BUNDLES',
-                             'canonical-kubernetes-canal,kubernetes-core')
-bundles = [bundle.strip() for bundle in bundles_csv.split(',')]
+<<<<<<< 3bf418b94219cf9788871f5113301f81201000fa
+bundles = [
+    'canonical-kubernetes-canal',
+    'kubernetes-core',
+    # 'canonical-kubernetes',
+]
+=======
+bundles = os.environ.get('TEST_BUNDLES', 
+                         "'canonical-kubernetes-canal','kubernetes-core'").split(',')
+>>>>>>> Get bundles from env variable
 
 
 @pytest.mark.asyncio
