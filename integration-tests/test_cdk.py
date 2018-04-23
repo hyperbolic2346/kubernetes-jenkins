@@ -14,6 +14,12 @@ upgrade_from_charm_channel = os.environ.get('UPGRADE_FROM_CHARM_CHANNEL', 'stabl
 bundles = [bundle.strip() for bundle in bundles_csv.split(',')]
 
 
+async def after_deploy(model, cloud):
+    if cloud == 'localhost':
+        worker = model.applications['kubernetes-worker']
+        await worker.set_config({'proxy-extra-args': 'userspace'})
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize('bundle', bundles)
 async def test_deploy(bundle, log_dir):
@@ -22,6 +28,7 @@ async def test_deploy(bundle, log_dir):
         #                 snap_channel)
         await juju_deploy(model, namespace, bundle, test_charm_channel,
                           test_snap_channel)
+        await after_deploy(model, test_cloud)
         await deploy_e2e(model, test_charm_channel, test_snap_channel,
                          namespace=namespace)
         await validate_all(model, log_dir)
@@ -34,6 +41,7 @@ async def test_upgrade(bundle, log_dir):
         # await conjureup(model, namespace, bundle, 'stable')
         await juju_deploy(model, namespace, bundle, upgrade_from_charm_channel,
                           upgrade_from_snap_channel)
+        await after_deploy(model, test_cloud)
         await upgrade_charms(model, test_charm_channel)
         await upgrade_snaps(model, test_snap_channel)
         await deploy_e2e(model, test_charm_channel,
