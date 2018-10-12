@@ -224,7 +224,7 @@ async def juju_deploy(model, namespace, bundle, channel='stable', snap_channel=N
 
 
 async def patch_bundle(bundle, snap_channel):
-    ''' Patch the bundle with snap, procy and arch specific properties. '''
+    ''' Patch the bundle with snap, proxy and arch specific properties. '''
     if os.getenv('http_proxy') and os.getenv('https_proxy'):
         # Lets inject proxy settings
         http_proxy = os.environ.get('http_proxy')

@@ -5,6 +5,7 @@ import requests
 import traceback
 import yaml
 import re
+import random
 
 from asyncio_extras import async_contextmanager
 from async_generator import yield_
@@ -51,6 +52,7 @@ async def validate_all(model, log_dir):
     await validate_audit_empty_policy(model)
     await validate_audit_custom_policy(model)
     await validate_audit_webhook(model)
+    await validate_keystone(model)
     assert_no_unit_errors(model)
 
 
@@ -153,6 +155,21 @@ async def wait_for_process(model, arg):
             if checks <= 0:
                 assert False
             await asyncio.sleep(5)
+
+
+@log_calls_async
+async def wait_for_not_process(model, arg):
+    ''' Retry api_server_with_arg <checks> times with a 5 sec interval '''
+    checks = 10
+    ready = False
+    while not ready:
+        checks -= 1
+        if await api_server_with_arg(model, arg):
+            if checks <= 0:
+                assert False
+            await asyncio.sleep(5)
+        else:
+            return
 
 
 async def api_server_with_arg(model, argument):
@@ -294,22 +311,26 @@ async def verify_deleted(unit, entity_type, name, extra_args=''):
 
 # note that name_list is a list of entities(pods, services, etc) being searched
 # and that partial matches work. If you have a pod with random characters at the
-# end due to being in a deploymnet, you can add just the name of the deployment
+# end due to being in a deployment, you can add just the name of the deployment
 # and it will still match
 async def verify_ready(unit, entity_type, name_list, extra_args=''):
     cmd = "/snap/bin/kubectl {} --output json get {}".format(extra_args, entity_type)
     output = await unit.run(cmd)
     out_list = json.loads(output.results['Stdout'])
-    found_names = 0
-    for item in out_list['items']:
-        if any(n in item['metadata']['name'] for n in name_list):
-            if (item['kind'] == 'DaemonSet' or
-                item['status']['phase'] == 'Running' or
-                item['status']['phase'] == 'Active'):
-                found_names += 1
-            else:
-                return False
-    return found_names == len(name_list)
+
+    for name in name_list:
+        # find all entries that match this
+        matches = [n for n in out_list['items'] if name in n['metadata']['name']]
+
+        # now verify they are ALL ready, it isn't cool if just one is ready now
+        ready = [n for n in matches if n['kind'] == 'DaemonSet' or
+                 n['status']['phase'] == 'Running' or
+                 n['status']['phase'] == 'Active']
+        if len(ready) != len(matches):
+            return False
+
+    # made it here then all the matches are ready
+    return True
 
 
 @log_calls_async
@@ -1157,6 +1178,74 @@ async def validate_audit_webhook(model):
 
     # Clean up
     await reset_audit_config(app)
+
+
+@log_calls_async
+async def validate_keystone(model):
+    # add keystone
+    await model.deploy('keystone')
+    await model.deploy('mysql', series='xenial')
+    await model.add_relation('kubernetes-master:keystone-credentials',
+                             'keystone:identity-credentials')
+    await model.add_relation('keystone:shared-db', 'mysql:shared-db')
+    await wait_for_ready(model)
+
+    masters = model.applications['kubernetes-master']
+
+    # verify kubectl config file has keystone in it
+    one_master = random.choice(masters.units)
+    for i in range(5):
+        action = await one_master.run('cat /home/ubuntu/config')
+        if 'client-keystone-auth' in action.results['Stdout']:
+            break
+        log("Unable to find keystone information in kubeconfig, retrying...")
+        await asyncio.sleep(10)
+
+    assert 'client-keystone-auth' in action.results['Stdout']
+
+    # verify kube-keystone.sh exists
+    one_master = random.choice(masters.units)
+    action = await one_master.run('cat /home/ubuntu/kube-keystone.sh')
+    assert 'OS_AUTH_URL' in action.results['Stdout']
+
+    # verify webhook enabled on apiserver
+    await wait_for_process(model, 'authentication-token-webhook-config-file')
+    one_master = random.choice(masters.units)
+    action = await one_master.run('sudo cat /root/cdk/keystone/webhook.yaml')
+    assert 'webhook' in action.results['Stdout']
+
+    # verify keystone pod is running
+    await retry_async_with_timeout(verify_ready,
+                                   (one_master, 'po', ['k8s-keystone-auth'], '-n kube-system'),
+                                   timeout_msg="Unable to find keystone auth pod before timeout")
+
+    # verify authorization
+    await masters.set_config({'enable-keystone-authorization': 'true'})
+    await wait_for_process(model, 'authorization-webhook-config-file')
+
+    # verify auth fail
+    one_master = random.choice(masters.units)
+    await one_master.run('/usr/bin/snap install --edge client-keystone-auth')
+
+    cmd = "source /home/ubuntu/kube-keystone.sh && \
+           OS_PROJECT_NAME=k8s OS_DOMAIN_NAME=k8s OS_USERNAME=fake \
+           OS_PASSWORD=bad /snap/bin/kubectl --kubeconfig /home/ubuntu/config get clusterroles"
+    output = await one_master.run(cmd)
+    assert output.status == 'completed'
+    assert "invalid user credentials" in output.data['results']['Stderr'].lower()
+
+    # verify auth works now that it is off
+    await masters.set_config({'enable-keystone-authorization': 'false'})
+    await wait_for_not_process(model, 'authorization-webhook-config-file')
+    cmd = "/snap/bin/kubectl --kubeconfig /home/ubuntu/kubeconfig get clusterroles"
+    worker = model.applications['kubernetes-worker'].units[0]
+    output = await worker.run(cmd)
+    assert output.status == 'completed'
+    assert "invalid user credentials" not in output.data['results']['Stderr'].lower()
+
+    # cleanup
+    await model.applications['keystone'].destroy()
+    await model.applications['mysql'].destroy()
 
 
 class MicrobotError(Exception):
